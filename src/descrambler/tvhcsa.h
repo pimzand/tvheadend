@@ -26,6 +26,9 @@ struct elementary_stream;
 #include "build.h"
 #if ENABLE_DVBCSA
 #include <dvbcsa/dvbcsa.h>
+#if DVBCSA_KEY_ECM > 0
+#define dvbcsa_bs_key_set(a,b) dvbcsa_bs_key_set_ecm(csa->csa_ecm,a,b)
+#endif
 #endif
 #include "tvhlog.h"
 
@@ -47,6 +50,7 @@ typedef struct tvhcsa
   uint8_t *csa_tsbcluster;
   int      csa_fill;
   int      csa_fill_size;
+  uint8_t  csa_ecm;
 
 #if ENABLE_DVBCSA
   struct dvbcsa_bs_batch_s *csa_tsbbatch_even;
@@ -66,8 +70,8 @@ typedef struct tvhcsa
 
 int  tvhcsa_set_type( tvhcsa_t *csa, struct mpegts_service *s, int type );
 
-void tvhcsa_set_key_even( tvhcsa_t *csa, const uint8_t *even, const uint8_t ecm );
-void tvhcsa_set_key_odd ( tvhcsa_t *csa, const uint8_t *odd, const uint8_t ecm );
+void tvhcsa_set_key_even( tvhcsa_t *csa, const uint8_t *even );
+void tvhcsa_set_key_odd ( tvhcsa_t *csa, const uint8_t *odd );
 
 void tvhcsa_init    ( tvhcsa_t *csa );
 void tvhcsa_destroy ( tvhcsa_t *csa );
@@ -76,8 +80,8 @@ void tvhcsa_destroy ( tvhcsa_t *csa );
 
 static inline int tvhcsa_set_type( tvhcsa_t *csa, struct mpegts_service *s, int type ) { return -1; }
 
-static inline void tvhcsa_set_key_even( tvhcsa_t *csa, const uint8_t *even, const uint8_t ecm ) { };
-static inline void tvhcsa_set_key_odd ( tvhcsa_t *csa, const uint8_t *odd, const uint8_t ecm ) { };
+static inline void tvhcsa_set_key_even( tvhcsa_t *csa, const uint8_t *even ) { };
+static inline void tvhcsa_set_key_odd ( tvhcsa_t *csa, const uint8_t *odd ) { };
 
 static inline void tvhcsa_init ( tvhcsa_t *csa ) { };
 static inline void tvhcsa_destroy ( tvhcsa_t *csa ) { };
