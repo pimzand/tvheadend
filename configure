@@ -763,14 +763,6 @@ if enabled_or_auto tvhcsa; then
        check_cc_lib    dvbcsa dvbcsa_l) ||\
       die "Failed to find dvbcsa library"
       LDFLAGS="$LDFLAGS -ldvbcsa"
-      check_cc '
-      #include <dvbcsa/dvbcsa.h>
-      int test(void)
-      {
-        dvbcsa_bs_key_set_ecm;
-        return 0;
-      }
-      ' && CFLAGS="$CFLAGS -DDVBCSA_KEY_ECM=1" && printf "    ^ dvbcsa icam\n"
     fi
   else
     disable tvhcsa
