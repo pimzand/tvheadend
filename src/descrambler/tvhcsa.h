@@ -26,9 +26,6 @@ struct elementary_stream;
 #include "build.h"
 #if ENABLE_DVBCSA
 #include <dvbcsa/dvbcsa.h>
-#if DVBCSA_KEY_ECM > 0
-#define dvbcsa_bs_key_set(a,b) dvbcsa_bs_key_set_ecm(csa->csa_ecm,a,b)
-#endif
 #endif
 #include "tvhlog.h"
 
@@ -86,6 +83,11 @@ static inline void tvhcsa_set_key_odd ( tvhcsa_t *csa, const uint8_t *odd ) { };
 static inline void tvhcsa_init ( tvhcsa_t *csa ) { };
 static inline void tvhcsa_destroy ( tvhcsa_t *csa ) { };
 
+#endif
+
+#if ENABLE_DVBCSA
+typedef void* (*dvbcsa_dl_bs_key_set_type)(const unsigned char ecm, const dvbcsa_cw_t cw, struct dvbcsa_bs_key_s *key);
+void dvbcsa_bs_key_set_wrap(const unsigned char ecm, const dvbcsa_cw_t cw, struct dvbcsa_bs_key_s *key);
 #endif
 
 #endif /* __TVH_CSA_H__ */
