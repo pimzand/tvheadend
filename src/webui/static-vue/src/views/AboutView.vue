@@ -64,18 +64,11 @@ const currentYear = new Date().getFullYear()
 
 <template>
   <article class="view about">
-    <header class="view__header">
-      <h1>{{ t('About') }}</h1>
-    </header>
 
     <section class="about__hero">
       <img class="about__logo" :src="serverUrl('static/img/logobig.png')" alt="" />
-      <h2 class="about__title">
-        HTS Tvheadend
-        <span v-if="info?.sw_version" class="about__version">{{ info.sw_version }}</span>
-      </h2>
       <p class="about__copyright">
-        {{ t('© 2006–{0} Andreas Smas, Jaroslav Kysela, Adam Sutton, et al.', currentYear) }}
+        {{ t('© 2006–{0} Tvheadend Project', currentYear) }}
       </p>
       <p class="about__link">
         <a href="https://tvheadend.org" target="_blank" rel="noopener noreferrer">
@@ -85,18 +78,14 @@ const currentYear = new Date().getFullYear()
     </section>
 
     <section v-if="info" class="about__section">
-      <h3 class="about__section-title">{{ t('Server') }}</h3>
+      <h3 class="about__section-title">{{ t('About') }}</h3>
       <dl class="about__details">
         <template v-if="info.sw_version">
           <dt>{{ t('Version') }}</dt>
-          <dd>{{ info.sw_version }}</dd>
-        </template>
-        <template v-if="info.api_version !== undefined">
-          <dt>{{ t('API version') }}</dt>
-          <dd>{{ info.api_version }}</dd>
+          <dd>{{ t('Tvheadend {0}', info.sw_version) }}</dd>
         </template>
         <template v-if="info.capabilities && info.capabilities.length > 0">
-          <dt>{{ t('Enabled capabilities') }}</dt>
+          <dt>{{ t('Capabilities') }}</dt>
           <dd>
             <span
               v-for="cap in [...info.capabilities].sort()"
@@ -111,12 +100,12 @@ const currentYear = new Date().getFullYear()
     </section>
 
     <section class="about__section">
-      <h3 class="about__section-title">{{ t('Open source acknowledgements') }}</h3>
+      <h3 class="about__section-title">{{ t('Credits') }}</h3>
       <!-- Vue UI stack — what this page (and the rest of the
            new admin UI) is built on. Listed first because
            it's what the user is currently looking at. -->
       <p>
-        {{ t('New web UI built with') }}
+        {{ t('Web UI built with') }}
         <a href="https://vuejs.org" target="_blank" rel="noopener noreferrer">Vue</a>,
         <a href="https://router.vuejs.org" target="_blank" rel="noopener noreferrer"
           >Vue Router</a
@@ -136,7 +125,7 @@ const currentYear = new Date().getFullYear()
            is the standing project term for the legacy ExtJS
            interface. -->
       <p>
-        {{ t('Classic web UI based on software from') }}
+        {{ t('Classic UI built with') }}
         <a href="https://www.extjs.com/" target="_blank" rel="noopener noreferrer">ExtJS</a>.
         {{ t('Icons from') }}
         <a
@@ -149,7 +138,7 @@ const currentYear = new Date().getFullYear()
           href="https://www.google.com/get/noto/help/emoji/"
           target="_blank"
           rel="noopener noreferrer"
-          >Google Noto Color Emoji</a
+          >Google Noto Color Emoji </a
         >
         <a
           href="https://raw.githubusercontent.com/googlei18n/noto-emoji/master/LICENSE"
@@ -158,53 +147,37 @@ const currentYear = new Date().getFullYear()
           >{{ t('(Apache Licence v2.0)') }}</a
         >.
       </p>
-    </section>
-
-    <!-- Third-party data APIs — separate from the open-source
-         section because TMDB and TheTVDB are external services
-         (not bundled libraries), and the "not endorsed or
-         certified" wording is REQUIRED verbatim by both
-         providers' terms of service whenever their API is
-         consumed. Their logos must accompany the disclaimer
-         under the same terms. -->
-    <section class="about__section">
-      <h3 class="about__section-title">{{ t('Third-party data sources') }}</h3>
-      <p>{{ t('This product uses the TMDB and TheTVDB.com API to provide TV information and images.') }}</p>
       <p>
-        {{ t('It is not endorsed or certified by') }}
+        <!-- TMDB and TheTVDB are external services (not
+        bundled libraries), and the "not endorsed or certified"
+        wording is REQUIRED verbatim by both providers' terms
+        of service whenever their API is consumed. Their logos
+        must accompany the disclaimer under the same terms.
+        -->
+        {{ t('Tvheadend uses APIs from (but is not endorsed or certified by)') }}
         <a href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer">TMDb</a>
         <img class="about__inline-logo" :src="serverUrl('static/img/tmdb.png')" alt="" />
-        {{ t('or by') }}
+        {{ t('and') }}
         <a href="https://thetvdb.com" target="_blank" rel="noopener noreferrer">TheTVDB.com</a>
         <img class="about__inline-logo" :src="serverUrl('static/img/tvdb.png')" alt="" />.
       </p>
     </section>
 
-    <section class="about__section about__donation">
+    <section class="about__donation">
       <p>
-        {{ t('To support Tvheadend development please consider making a donation') }}<br />
-        {{ t('towards project operating costs.') }}
-      </p>
-      <a
-        href="https://opencollective.com/tvheadend/donate"
-        target="_blank"
-        rel="noopener noreferrer"
-      >
+        <a
+          href="https://opencollective.com/tvheadend/donate"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
         <img :src="serverUrl('static/img/opencollective.png')" :alt="t('Donate via OpenCollective')" />
-      </a>
+        </a>
+      </p>
     </section>
   </article>
 </template>
 
 <style scoped>
-.view__header {
-  margin-bottom: var(--tvh-space-4);
-}
-
-.view h1 {
-  font-size: var(--tvh-text-3xl);
-}
-
 .about {
   max-width: 720px;
   margin: 0 auto;
