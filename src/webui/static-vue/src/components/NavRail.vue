@@ -71,7 +71,7 @@ const { toggle: toggleRail } = useRailPreference()
  */
 const toggleIcon = computed(() => (props.compact ? PanelLeftOpen : PanelLeftClose))
 const toggleTitle = computed(() =>
-  props.compact ? t('Expand navigation') : t('Collapse navigation'),
+  props.compact ? t('Expand') : t('Collapse'),
 )
 
 /*
