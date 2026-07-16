@@ -19,6 +19,7 @@
 
 #include "tvheadend.h"
 #include "dvr/dvr.h"
+#include "dvr/dvr_autorec_expr.h"
 #include "lang_codes.h"
 #include "epg.h"
 #include "api.h"
@@ -409,6 +410,10 @@ api_dvr_entry_move_failed
   return api_idnode_handler(&dvr_entry_class, perm, args, resp, api_dvr_move_failed, "move failed", 0);
 }
 
+/* The autorec grid is split per view (same pattern as the
+ * dvr/entry grid_* family): the default grid returns flat rules only,
+ * grid_smart the expression-bearing rest. ExtJS calls the default
+ * grid unchanged, so smart entries never reach it. */
 static void
 api_dvr_autorec_grid
   ( access_t *perm, idnode_set_t *ins, api_idnode_grid_conf_t *conf, htsmsg_t *args )
@@ -416,7 +421,44 @@ api_dvr_autorec_grid
   dvr_autorec_entry_t *dae;
 
   TAILQ_FOREACH(dae, &autorec_entries, dae_link)
-    idnode_set_add(ins, (idnode_t*)dae, &conf->filter, perm->aa_lang_ui);
+    if (!dvr_autorec_entry_is_smart(dae))
+      idnode_set_add(ins, (idnode_t*)dae, &conf->filter, perm->aa_lang_ui);
+}
+
+static void
+api_dvr_autorec_grid_smart
+  ( access_t *perm, idnode_set_t *ins, api_idnode_grid_conf_t *conf, htsmsg_t *args )
+{
+  dvr_autorec_entry_t *dae;
+
+  TAILQ_FOREACH(dae, &autorec_entries, dae_link)
+    if (dvr_autorec_entry_is_smart(dae))
+      idnode_set_add(ins, (idnode_t*)dae, &conf->filter, perm->aa_lang_ui);
+}
+
+/* Match-all safeguard: a smart rule matching more than this
+ * share of the scanned EPG is rejected at create time unless the
+ * request carries a force flag. The gate is skipped when the scanned
+ * population is too small to make the ratio meaningful. */
+#define AUTOREC_GATE_MATCH_PERCENT  50
+#define AUTOREC_GATE_MIN_SCANNED    100
+
+static void
+api_dvr_autorec_scan_count
+  ( dvr_autorec_entry_t *dae, uint32_t *matchedp, uint32_t *scannedp )
+{
+  channel_t *ch;
+  epg_broadcast_t *e;
+
+  *matchedp = *scannedp = 0;
+  CHANNEL_FOREACH(ch) {
+    if (!ch->ch_enabled) continue;
+    RB_FOREACH(e, &ch->ch_epg_schedule, sched_link) {
+      (*scannedp)++;
+      if (dvr_autorec_cmp(dae, e))
+        (*matchedp)++;
+    }
+  }
 }
 
 static int
@@ -426,10 +468,13 @@ api_dvr_autorec_create
   htsmsg_t *conf;
   dvr_config_t *cfg;
   dvr_autorec_entry_t *dae;
-  const char *s1;
+  const char *s1, *expr;
+  uint32_t matched, scanned;
+  int force;
 
   if (!(conf  = htsmsg_get_map(args, "conf")))
     return EINVAL;
+  force = htsmsg_get_bool_or_default(args, "force", 0);
 
   htsmsg_set_str2(conf, "owner", perm->aa_username);
   htsmsg_set_str2(conf, "creator", perm->aa_representative);
@@ -442,6 +487,29 @@ api_dvr_autorec_create
   cfg = dvr_config_find_by_list(perm->aa_dvrcfgs, s1);
   if (cfg) {
     htsmsg_set_uuid(conf, "config_name", &cfg->dvr_id.in_uuid);
+    expr = htsmsg_get_str(conf, "expression");
+    if (expr && expr[0] != '\0' && !force) {
+      dae = dvr_autorec_create_transient(conf);
+      if (dae == NULL) {
+        tvh_mutex_unlock(&global_lock);
+        return EINVAL;
+      }
+      dae->dae_enabled = 1;
+      api_dvr_autorec_scan_count(dae, &matched, &scanned);
+      dvr_autorec_destroy_transient(dae);
+      if (scanned >= AUTOREC_GATE_MIN_SCANNED &&
+          (uint64_t)matched * 100 > (uint64_t)scanned * AUTOREC_GATE_MATCH_PERCENT) {
+        tvh_mutex_unlock(&global_lock);
+        *resp = htsmsg_create_map();
+        htsmsg_add_str(*resp, "error",
+                       "expression matches most of the EPG; "
+                       "resubmit with force to save anyway");
+        htsmsg_add_u32(*resp, "force_required", 1);
+        htsmsg_add_u32(*resp, "matched", matched);
+        htsmsg_add_u32(*resp, "scanned", scanned);
+        return 0;
+      }
+    }
     dae = dvr_autorec_create(NULL, conf);
     if (dae) {
       api_idnode_create(resp, &dae->dae_id);
@@ -451,6 +519,252 @@ api_dvr_autorec_create
   }
   tvh_mutex_unlock(&global_lock);
 
+  return 0;
+}
+
+/*
+ * Preview which EPG events an autorec rule (saved or not) would match,
+ * without saving anything. The payload is the same "conf" object as
+ * dvr/autorec/create; the scan runs the real matcher over a transient
+ * entry, so the preview cannot drift from actual matching behaviour.
+ */
+static int
+api_dvr_autorec_preview
+  ( access_t *perm, void *opaque, const char *op, htsmsg_t *args, htsmsg_t **resp )
+{
+  htsmsg_t *conf, *entries, *m;
+  dvr_config_t *cfg;
+  dvr_autorec_entry_t *dae, *existing;
+  dvr_autorec_expr_t *comp;
+  dvr_entry_t *de;
+  channel_t *ch;
+  epg_broadcast_t *e;
+  const char *s1, *expr, *disposition;
+  char errbuf[512], ubuf[UUID_HEX_SIZE];
+  uint32_t scanned = 0, matched = 0, sched = 0, maxsched, listed = 0;
+  int64_t limit;
+
+  if (!(conf = htsmsg_get_map(args, "conf")))
+    return EINVAL;
+  limit = htsmsg_get_s64_or_default(args, "limit", 0);
+
+  /* Pre-validate the expression so the editor gets the parse error
+   * text; a real save has no error channel and can only flag. */
+  expr = htsmsg_get_str(conf, "expression");
+  if (expr && expr[0] != '\0') {
+    comp = dvr_autorec_expr_compile(expr, errbuf, sizeof(errbuf));
+    if (comp == NULL) {
+      *resp = htsmsg_create_map();
+      htsmsg_add_str(*resp, "error", errbuf);
+      return 0;
+    }
+    dvr_autorec_expr_free(comp);
+  }
+
+  htsmsg_set_str2(conf, "owner", perm->aa_username);
+  htsmsg_set_str2(conf, "creator", perm->aa_representative);
+
+  s1 = htsmsg_get_str(conf, "config_uuid");
+  if (s1 == NULL)
+    s1 = htsmsg_get_str(conf, "config_name");
+
+  tvh_mutex_lock(&global_lock);
+  cfg = dvr_config_find_by_list(perm->aa_dvrcfgs, s1);
+  if (cfg == NULL) {
+    tvh_mutex_unlock(&global_lock);
+    return EPERM;
+  }
+  htsmsg_set_uuid(conf, "config_name", &cfg->dvr_id.in_uuid);
+  dae = dvr_autorec_create_transient(conf);
+  if (dae == NULL) {
+    tvh_mutex_unlock(&global_lock);
+    return EINVAL;
+  }
+  if (dae->dae_error) {
+    /* a flat-field error, e.g. an invalid title regex */
+    dvr_autorec_destroy_transient(dae);
+    tvh_mutex_unlock(&global_lock);
+    *resp = htsmsg_create_map();
+    htsmsg_add_str(*resp, "error", "invalid rule (bad regular expression?)");
+    return 0;
+  }
+  /* the preview answers "what would this rule match when enabled" */
+  dae->dae_enabled = 1;
+
+  /* When previewing an edit, the rule's own live schedules count
+   * toward the max schedules limit, as they would on a real save. */
+  maxsched = dvr_autorec_get_max_sched_count(dae);
+  s1 = htsmsg_get_str(conf, "uuid");
+  existing = s1 ? dvr_autorec_find_by_uuid(s1) : NULL;
+  if (existing) {
+    LIST_FOREACH(de, &existing->dae_spawns, de_autorec_link)
+      if (de->de_sched_state == DVR_SCHEDULED ||
+          de->de_sched_state == DVR_RECORDING)
+        sched++;
+  }
+
+  entries = htsmsg_create_list();
+  CHANNEL_FOREACH(ch) {
+    if (!ch->ch_enabled) continue;
+    RB_FOREACH(e, &ch->ch_epg_schedule, sched_link) {
+      scanned++;
+      if (!dvr_autorec_cmp(dae, e)) continue;
+      matched++;
+      /* The identical-duplicate scan from dvr_entry_create_by_autorec,
+       * read-only: an existing entry for the same broadcast (or a
+       * matching episode) by the same owner means a save would not
+       * schedule this event again. Start-time duplicate detection is
+       * deliberately not previewed: the real Upcoming grid does not
+       * anticipate it either. */
+      disposition = "record";
+      LIST_FOREACH(de, &dvrentries, de_global_link) {
+        if ((de->de_bcast == e || epg_episode_match(de->de_bcast, e)) &&
+            strcmp(dae->dae_owner ?: "", de->de_owner ?: "") == 0) {
+          disposition = "scheduled";
+          break;
+        }
+      }
+      if (disposition[0] == 'r') {
+        if (maxsched > 0 && sched >= maxsched)
+          disposition = "maxsched";
+        else
+          sched++;
+      }
+      if (limit > 0 && listed >= limit)
+        continue;
+      listed++;
+      m = htsmsg_create_map();
+      htsmsg_add_u32(m, "eventId", e->id);
+      htsmsg_add_str(m, "channelUuid", idnode_uuid_as_str(&ch->ch_id, ubuf));
+      htsmsg_add_str2(m, "channelName", channel_get_name(ch, ""));
+      htsmsg_add_str2(m, "title", lang_str_get(e->title, perm->aa_lang_ui));
+      htsmsg_add_str2(m, "subtitle", lang_str_get(e->subtitle, perm->aa_lang_ui));
+      htsmsg_add_s64(m, "start", e->start);
+      htsmsg_add_s64(m, "stop", e->stop);
+      htsmsg_add_str(m, "disposition", disposition);
+      htsmsg_add_msg(entries, NULL, m);
+    }
+  }
+  dvr_autorec_destroy_transient(dae);
+  tvh_mutex_unlock(&global_lock);
+
+  *resp = htsmsg_create_map();
+  htsmsg_add_msg(*resp, "entries", entries);
+  htsmsg_add_u32(*resp, "matched", matched);
+  htsmsg_add_u32(*resp, "scanned", scanned);
+  if (matched > listed)
+    htsmsg_add_u32(*resp, "truncated", 1);
+  /* the create gate's verdict, precomputed for the editor: the hard
+   * gate covers creates only, the Vue edit-save flow warns
+   * voluntarily on the same threshold, and serving the flag here
+   * keeps the constants in one place */
+  if (scanned >= AUTOREC_GATE_MIN_SCANNED &&
+      (uint64_t)matched * 100 > (uint64_t)scanned * AUTOREC_GATE_MATCH_PERCENT)
+    htsmsg_add_u32(*resp, "matchall", 1);
+  return 0;
+}
+
+/*
+ * Convert a flat rule into its exact smart equivalent. dry_run
+ * returns the generated expression and warnings without touching the
+ * rule; apply additionally clears the flat selector fields and stores
+ * the expression. The clearing must happen server-side and first: the
+ * dynamic write masking keys on a non-empty expression (and writes the
+ * expression property before the selectors in table order), and
+ * serieslink is read-only at the API surface at all times. Clearing
+ * the flat fields is what keeps the no-constraint HTSP encoding
+ * true for converted rules.
+ */
+static int
+api_dvr_autorec_convert
+  ( access_t *perm, void *opaque, const char *op, htsmsg_t *args, htsmsg_t **resp )
+{
+  dvr_autorec_entry_t *dae;
+  htsmsg_t *warnings, *m, *days;
+  const char *uuid;
+  char *expr;
+  int dry_run, i;
+
+  if (!(uuid = htsmsg_get_str(args, "uuid")))
+    return EINVAL;
+  dry_run = htsmsg_get_bool_or_default(args, "dry_run", 0);
+
+  tvh_mutex_lock(&global_lock);
+  dae = dvr_autorec_find_by_uuid(uuid);
+  if (dae == NULL) {
+    tvh_mutex_unlock(&global_lock);
+    return ENOENT;
+  }
+  if (dvr_autorec_entry_verify(dae, perm, 0)) {
+    tvh_mutex_unlock(&global_lock);
+    return EPERM;
+  }
+  if (dvr_autorec_entry_is_smart(dae)) {
+    tvh_mutex_unlock(&global_lock);
+    *resp = htsmsg_create_map();
+    htsmsg_add_str(*resp, "error", "the rule is already a smart entry");
+    return 0;
+  }
+
+  warnings = htsmsg_create_list();
+  expr = dvr_autorec_expr_from_flat(dae, warnings);
+  if (expr == NULL) {
+    htsmsg_field_t *wf = TAILQ_FIRST(&warnings->hm_fields);
+    const char *why = wf ? htsmsg_field_get_string(wf) : NULL;
+    tvh_mutex_unlock(&global_lock);
+    *resp = htsmsg_create_map();
+    htsmsg_add_str(*resp, "error",
+                   why ?: "the rule has no convertible matching conditions");
+    htsmsg_add_msg(*resp, "warnings", warnings);
+    return 0;
+  }
+
+  if (!dry_run) {
+    /* Phase 1: clear every flat selector while the expression is
+     * still empty. Mask-free internal write (optmask 0) so the
+     * always-PO_RDONLY serieslink resets along with the rest. */
+    m = htsmsg_create_map();
+    htsmsg_add_str(m, "title", "");
+    htsmsg_add_bool(m, "fulltext", 0);
+    htsmsg_add_bool(m, "mergetext", 0);
+    htsmsg_add_str(m, "channel", "");
+    htsmsg_add_str(m, "tag", "");
+    htsmsg_add_u32(m, "btype", DVR_AUTOREC_BTYPE_ALL);
+    htsmsg_add_u32(m, "content_type", 0);
+    htsmsg_add_str(m, "cat1", "");
+    htsmsg_add_str(m, "cat2", "");
+    htsmsg_add_str(m, "cat3", "");
+    htsmsg_add_u32(m, "star_rating", 0);
+    htsmsg_add_str(m, "start", "");
+    htsmsg_add_str(m, "start_window", "");
+    htsmsg_add_s64(m, "minduration", 0);
+    htsmsg_add_s64(m, "maxduration", 0);
+    htsmsg_add_u32(m, "minyear", 0);
+    htsmsg_add_u32(m, "maxyear", 0);
+    htsmsg_add_u32(m, "minseason", 0);
+    htsmsg_add_u32(m, "maxseason", 0);
+    days = htsmsg_create_list();
+    for (i = 1; i <= 7; i++)
+      htsmsg_add_u32(days, NULL, i);
+    htsmsg_add_msg(m, "weekdays", days);
+    idnode_write0(&dae->dae_id, m, 0, 0);
+    htsmsg_destroy(m);
+    free((void *)dae->dae_serieslink_uri);
+    dae->dae_serieslink_uri = NULL;
+
+    /* Phase 2: store the expression; dosave fires the class changed
+     * hook (spawn rescan, HTSP update) and persists. */
+    m = htsmsg_create_map();
+    htsmsg_add_str(m, "expression", expr);
+    idnode_write0(&dae->dae_id, m, 0, 1);
+    htsmsg_destroy(m);
+  }
+  tvh_mutex_unlock(&global_lock);
+
+  *resp = htsmsg_create_map();
+  htsmsg_add_str(*resp, "expression", expr);
+  htsmsg_add_msg(*resp, "warnings", warnings);
+  free(expr);
   return 0;
 }
 
@@ -594,7 +908,10 @@ void api_dvr_init ( void )
 
     { "dvr/autorec/class",         ACCESS_RECORDER, api_idnode_class, (void*)&dvr_autorec_entry_class },
     { "dvr/autorec/grid",          ACCESS_RECORDER, api_idnode_grid,  api_dvr_autorec_grid },
+    { "dvr/autorec/grid_smart",    ACCESS_RECORDER, api_idnode_grid,  api_dvr_autorec_grid_smart },
     { "dvr/autorec/create",        ACCESS_RECORDER, api_dvr_autorec_create, NULL },
+    { "dvr/autorec/preview",       ACCESS_RECORDER, api_dvr_autorec_preview, NULL },
+    { "dvr/autorec/convert",       ACCESS_RECORDER, api_dvr_autorec_convert, NULL },
     { "dvr/autorec/create_by_series", ACCESS_RECORDER, api_dvr_autorec_create_by_series, NULL },
 
     { "dvr/timerec/class",         ACCESS_RECORDER, api_idnode_class, (void*)&dvr_timerec_entry_class },
